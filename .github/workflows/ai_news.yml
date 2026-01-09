@@ -1,0 +1,69 @@
+name: AI News Translator & Push
+
+on:
+  schedule:
+    - cron: '0 1 * * *' # 每天北京时间早上 9:00 运行
+  workflow_dispatch: # 支持你手动点击运行测试
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: pip install feedparser requests
+
+      - name: Run News Bot
+        env:
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          WECHAT_WEBHOOK: ${{ secrets.WECHAT_WEBHOOK }}
+        run: |
+          python - <<EOF
+          import feedparser
+          import requests
+          import os
+
+          # 1. 抓取英文 AI 资讯 (The Verge AI)
+          feed = feedparser.parse("https://www.theverge.com/ai-artificial-intelligence/rss/index.xml")
+          top_news = feed.entries[:3]  # 每次取最新的 3 条，防止字数太多
+
+          # 2. 准备翻译和推送的内容
+          final_message = "🤖 **AI 行业最新资讯 (自动翻译)**\n\n"
+
+          for entry in top_news:
+              title_en = entry.title
+              link = entry.link
+              
+              # 调用 DeepSeek 进行翻译 (这里使用 OpenAI 兼容格式)
+              try:
+                  resp = requests.post(
+                      "https://api.deepseek.com/chat/completions",
+                      headers={"Authorization": f"Bearer {os.environ['AI_API_KEY']}"},
+                      json={
+                          "model": "deepseek-chat",
+                          "messages": [
+                              {"role": "system", "content": "你是一个专业的科技翻译助手，请将下方的 AI 新闻标题翻译成通俗易懂的中文，只返回翻译结果。"},
+                              {"role": "user", "content": title_en}
+                          ]
+                      }
+                  )
+                  title_cn = resp.json()['choices'][0]['message']['content']
+              except:
+                  title_cn = "（翻译失败）" + title_en
+
+              final_message += f"🔹 **{title_cn}**\n🔗 [原文链接]({link})\n\n"
+
+          # 3. 推送到企业微信机器人
+          requests.post(
+              os.environ['WECHAT_WEBHOOK'],
+              json={
+                  "msgtype": "markdown",
+                  "markdown": {"content": final_message}
+              }
+          )
+          print("推送完成！")
+          EOF
