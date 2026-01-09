@@ -1,8 +1,33 @@
-import feedparser
+name: AI News Translator & Push
+
+on:
+  schedule:
+    - cron: '0 1 * * *' # 每天北京时间早上 9:00 运行
+  workflow_dispatch: # 支持手动点击运行测试
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: pip install feedparser requests
+
+      - name: Run News Bot
+        env:
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          WECHAT_WEBHOOK: ${{ secrets.WECHAT_WEBHOOK }}
+        run: |
+          python - <<EOF
+          import feedparser
           import requests
           import os
 
-          # 1. 尝试抓取资讯（如果 The Verge 不行，增加一个备选源）
+          # 1. 尝试抓取多个资讯源
           urls = [
               "https://www.theverge.com/ai-artificial-intelligence/rss/index.xml",
               "https://www.wired.com/feed/tag/ai/latest/rss"
@@ -10,15 +35,19 @@ import feedparser
           
           all_entries = []
           for url in urls:
-              feed = feedparser.parse(url)
-              all_entries.extend(feed.entries[:3])
+              try:
+                  feed = feedparser.parse(url)
+                  if feed.entries:
+                      all_entries.extend(feed.entries[:3])
+              except:
+                  continue
 
-          # 2. 准备内容
+          # 2. 准备推送内容
           if not all_entries:
-              final_message = "🤖 **AI 情报员：** 暂时没有发现新资讯，我会继续监控。"
+              final_message = "🤖 **AI 情报员：** 系统连接正常，但当前各外媒频道暂无最新 AI 资讯更新，我会持续监控。"
           else:
               final_message = "🤖 **AI 行业最新资讯 (自动翻译)**\n\n"
-              for entry in all_entries[:3]: # 只取前3条最精简的
+              for entry in all_entries[:3]: # 取前3条最精简的
                   title_en = entry.title
                   link = entry.link
                   
@@ -29,22 +58,21 @@ import feedparser
                           json={
                               "model": "deepseek-chat",
                               "messages": [
-                                  {"role": "system", "content": "你是一个专业的科技翻译助手，请将下方的 AI 新闻标题翻译成通俗易懂的中文，只返回翻译结果。"},
+                                  {"role": "system", "content": "你是一个专业的科技翻译助手，请将下方的 AI 新闻标题翻译成中文。仅输出翻译结果。"},
                                   {"role": "user", "content": title_en}
                               ]
                           },
-                          timeout=15
+                          timeout=20
                       )
                       title_cn = resp.json()['choices'][0]['message']['content']
                   except Exception as e:
-                      print(f"翻译出错: {e}")
-                      title_cn = "（翻译失败）" + title_en
+                      title_cn = f"（翻译略过）{title_en}"
 
                   final_message += f"🔹 **{title_cn}**\n🔗 [查看原文]({link})\n\n"
 
-          # 3. 推送
-          r = requests.post(
+          # 3. 推送到企业微信
+          requests.post(
               os.environ['WECHAT_WEBHOOK'],
               json={"msgtype": "markdown", "markdown": {"content": final_message}}
           )
-          print(f"推送状态码: {r.status_code}, 响应内容: {r.text}")
+          EOF
