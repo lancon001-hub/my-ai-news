@@ -1,9 +1,9 @@
-name: AI News Pro Summarizer
+name: AI News Final Pro
 
 on:
   schedule:
-    - cron: '0 1 * * *' # 每天北京时间早上 9:00 运行
-  workflow_dispatch: 
+    - cron: '0 1 * * *' # 每天北京时间早上 9:00 自动运行
+  workflow_dispatch: # 支持手动点击运行测试
 
 jobs:
   build:
@@ -28,7 +28,7 @@ jobs:
           import os
           from bs4 import BeautifulSoup
 
-          # 1. 监控多个顶级 AI 资讯源
+          # 1. 监控多个顶级 AI 资讯源，确保不落空
           sources = [
               "https://www.theverge.com/ai-artificial-intelligence/rss/index.xml",
               "https://techcrunch.com/category/artificial-intelligence/feed/",
@@ -40,7 +40,7 @@ jobs:
               try:
                   feed = feedparser.parse(url)
                   if feed.entries:
-                      # 每个源只取最新的 2 条，保证内容多样性
+                      # 每个源取最新的 2 条
                       all_entries.extend(feed.entries[:2])
               except:
                   continue
@@ -49,37 +49,47 @@ jobs:
               requests.post(os.environ['WECHAT_WEBHOOK'], json={"msgtype": "text", "text": {"content": "🤖 AI情报员：全网搜寻完毕，当前暂无重大新动态。"}})
               exit()
 
-          # 2. 准备推送
-          final_message = "🚀 **AI 行业深度内参 (多源聚合版)**\n\n"
+          # 2. 准备推送内容（完全不使用 Markdown 符号，确保普通微信直显）
+          final_message = "🚀 AI 行业深度内参 (精简版)\n\n"
 
-          # 3. 处理前 4 条最重要的新闻，防止消息过长
+          # 3. 处理前 4 条最重要的新闻
           for entry in all_entries[:4]:
               title_en = entry.title
-              summary_en = BeautifulSoup(entry.get('summary', 'No summary'), "html.parser").get_text()[:300]
+              # 获取摘要并清洗 HTML
+              summary_en = BeautifulSoup(entry.get('summary', 'No summary'), "html.parser").get_text()[:400]
               link = entry.link
               
               try:
+                  # 调用 DeepSeek 进行“翻译+总结”
                   resp = requests.post(
                       "https://api.deepseek.com/chat/completions",
                       headers={"Authorization": f"Bearer {os.environ['AI_API_KEY']}"},
                       json={
                           "model": "deepseek-chat",
                           "messages": [
-                              {"role": "system", "content": "你是一位专业的科技主编。请根据提供的 AI 新闻标题和摘要，创作一个吸引人的中文标题，并用 3 个要点总结核心价值。排版要求：第一行是加粗标题，接下来是 3 个带符号的要点。"},
+                              {"role": "system", "content": "你是一位专业的AI科技主编。请将提供的 AI 新闻标题翻译成吸引人的中文，并用 3 个要点总结核心价值。请直接使用文字和换行排版，绝对不要使用 ** 或 # 等任何 Markdown 符号。"},
                               {"role": "user", "content": f"Title: {title_en}\nSummary: {summary_en}"}
                           ]
                       },
                       timeout=30
                   )
                   ai_result = resp.json()['choices'][0]['message']['content']
+                  # 再次强制过滤可能出现的 Markdown 符号
+                  ai_result = ai_result.replace("**", "").replace("### ", "").replace("# ", "")
               except:
-                  ai_result = f"**{title_en}**\n(翻译及总结暂时离线)"
+                  ai_result = f"标题: {title_en}\n(翻译及总结暂时离线)"
 
-              final_message += f"{ai_result}\n🔗 [阅读原文]({link})\n\n---\n"
+              final_message += f"{ai_result}\n🔗 原文: {link}\n\n----------------\n"
 
-          # 4. 发送
+          # 4. 关键修改：使用 text 类型发送，解决普通微信报错问题
           requests.post(
               os.environ['WECHAT_WEBHOOK'],
-              json={"msgtype": "markdown", "markdown": {"content": final_message}}
+              json={
+                  "msgtype": "text",
+                  "text": {
+                      "content": final_message
+                  }
+              }
           )
+          print("推送完成！")
           EOF
