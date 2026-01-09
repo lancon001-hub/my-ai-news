@@ -1,4 +1,4 @@
-name: AI News Summarizer & Push
+name: AI News Pro Summarizer
 
 on:
   schedule:
@@ -28,32 +28,44 @@ jobs:
           import os
           from bs4 import BeautifulSoup
 
-          # 1. 抓取资讯源
-          url = "https://www.theverge.com/ai-artificial-intelligence/rss/index.xml"
-          feed = feedparser.parse(url)
+          # 1. 监控多个顶级 AI 资讯源
+          sources = [
+              "https://www.theverge.com/ai-artificial-intelligence/rss/index.xml",
+              "https://techcrunch.com/category/artificial-intelligence/feed/",
+              "https://openai.com/news/rss.xml"
+          ]
           
-          if not feed.entries:
-              requests.post(os.environ['WECHAT_WEBHOOK'], json={"msgtype": "text", "text": {"content": "今日暂无 AI 资讯更新"}})
+          all_entries = []
+          for url in sources:
+              try:
+                  feed = feedparser.parse(url)
+                  if feed.entries:
+                      # 每个源只取最新的 2 条，保证内容多样性
+                      all_entries.extend(feed.entries[:2])
+              except:
+                  continue
+
+          if not all_entries:
+              requests.post(os.environ['WECHAT_WEBHOOK'], json={"msgtype": "text", "text": {"content": "🤖 AI情报员：全网搜寻完毕，当前暂无重大新动态。"}})
               exit()
 
-          final_message = "🤖 **AI 行业情报 (深度总结版)**\n\n---\n"
+          # 2. 准备推送
+          final_message = "🚀 **AI 行业深度内参 (多源聚合版)**\n\n"
 
-          # 2. 循环处理前 3 条新闻
-          for entry in feed.entries[:3]:
+          # 3. 处理前 4 条最重要的新闻，防止消息过长
+          for entry in all_entries[:4]:
               title_en = entry.title
-              # 获取摘要并去除 HTML 标签
-              summary_en = BeautifulSoup(entry.summary, "html.parser").get_text() if 'summary' in entry else "No summary available"
+              summary_en = BeautifulSoup(entry.get('summary', 'No summary'), "html.parser").get_text()[:300]
               link = entry.link
               
               try:
-                  # 调用 AI 进行“翻译+摘要”
                   resp = requests.post(
                       "https://api.deepseek.com/chat/completions",
                       headers={"Authorization": f"Bearer {os.environ['AI_API_KEY']}"},
                       json={
                           "model": "deepseek-chat",
                           "messages": [
-                              {"role": "system", "content": "你是一个专业的 AI 科技记者。请将下面的英文新闻标题翻译成中文，并根据摘要内容，总结出 2-3 句中文核心要点。要求：用词通俗、排版整齐。"},
+                              {"role": "system", "content": "你是一位专业的科技主编。请根据提供的 AI 新闻标题和摘要，创作一个吸引人的中文标题，并用 3 个要点总结核心价值。排版要求：第一行是加粗标题，接下来是 3 个带符号的要点。"},
                               {"role": "user", "content": f"Title: {title_en}\nSummary: {summary_en}"}
                           ]
                       },
@@ -61,11 +73,11 @@ jobs:
                   )
                   ai_result = resp.json()['choices'][0]['message']['content']
               except:
-                  ai_result = f"【标题翻译】{title_en}\n(摘要总结失败)"
+                  ai_result = f"**{title_en}**\n(翻译及总结暂时离线)"
 
-              final_message += f"{ai_result}\n🔗 [原文链接]({link})\n\n---\n"
+              final_message += f"{ai_result}\n🔗 [阅读原文]({link})\n\n---\n"
 
-          # 3. 推送到企业微信
+          # 4. 发送
           requests.post(
               os.environ['WECHAT_WEBHOOK'],
               json={"msgtype": "markdown", "markdown": {"content": final_message}}
