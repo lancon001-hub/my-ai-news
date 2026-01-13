@@ -1,8 +1,8 @@
-name: AI News Final Pro
+name: AI News Tools & Courses Pro
 
 on:
   schedule:
-    - cron: '08 0 * * *' # 每天北京时间早上 9:00 自动运行
+    - cron: '26 0 * * *' # 每天北京时间早上 8:30 运行
   workflow_dispatch: # 支持手动点击运行测试
 
 jobs:
@@ -17,7 +17,7 @@ jobs:
       - name: Install dependencies
         run: pip install feedparser requests beautifulsoup4
 
-      - name: Run News Bot
+      - name: Run AI Tool Bot
         env:
           AI_API_KEY: ${{ secrets.AI_API_KEY }}
           WECHAT_WEBHOOK: ${{ secrets.WECHAT_WEBHOOK }}
@@ -26,62 +26,78 @@ jobs:
           import feedparser
           import requests
           import os
+          import re
           from bs4 import BeautifulSoup
 
-          # 1. 监控多个顶级 AI 资讯源，确保不落空
+          # 1. 筛选高质量的实战类与工具类信息源
           sources = [
-              "https://www.theverge.com/ai-artificial-intelligence/rss/index.xml",
-              "https://techcrunch.com/category/artificial-intelligence/feed/",
-              "https://openai.com/news/rss.xml"
+              "https://rsshub.app/deeplearning/the-batch",     # DeepLearning.AI (吴恩达周报)
+              "https://huggingface.co/blog/feed.xml",          # Hugging Face (模型与工具发布)
+              "https://www.unite.ai/category/ai-tools/feed/",  # 专门的 AI 工具评测
+              "https://blog.langchain.dev/rss/",                # LangChain 官方博客 (实战案例)
+              "https://github.com/trending/python?since=daily" # GitHub 趋势 (通过 Python 抓取逻辑间接实现或后续扩展)
           ]
           
+          # 核心关键词过滤，确保内容偏向“实用”和“学习”
+          keywords = ['course', 'tool', 'library', 'guide', 'tutorial', 'open source', 'release', 'framework', 'agent', 'workflow', 'model']
+
           all_entries = []
           for url in sources:
               try:
                   feed = feedparser.parse(url)
-                  if feed.entries:
-                      # 每个源取最新的 2 条
-                      all_entries.extend(feed.entries[:2])
-              except:
+                  if not feed.entries: continue
+                  
+                  source_count = 0
+                  for entry in feed.entries:
+                      content = (entry.title + entry.get('summary', '')).lower()
+                      # 如果匹配到关键词，或者是来自 DeepLearning.AI/HuggingFace 的内容，则优先选取
+                      if any(kw in content for kw in keywords) or "huggingface" in url or "deeplearning" in url:
+                          all_entries.append(entry)
+                          source_count += 1
+                      if source_count >= 2: break # 每个源最多取 2 条最相关的
+              except Exception as e:
+                  print(f"抓取 {url} 失败: {e}")
                   continue
 
           if not all_entries:
-              requests.post(os.environ['WECHAT_WEBHOOK'], json={"msgtype": "text", "text": {"content": "🤖 AI情报员：全网搜寻完毕，当前暂无重大新动态。"}})
+              requests.post(os.environ['WECHAT_WEBHOOK'], json={"msgtype": "text", "text": {"content": "🤖 AI情报员：今日暂无新的工具发布或课程更新。"}})
               exit()
 
-          # 2. 准备推送内容（完全不使用 Markdown 符号，确保普通微信直显）
-          final_message = "🚀 AI 行业深度内参 (精简版)\n\n"
+          # 2. 准备推送内容
+          final_message = "🛠️ AI 实战进阶 & 实用工具周报\n\n"
 
-          # 3. 处理前 4 条最重要的新闻
+          # 3. 调用 AI 进行深度总结（取前 4 条最有价值的）
           for entry in all_entries[:4]:
               title_en = entry.title
-              # 获取摘要并清洗 HTML
-              summary_en = BeautifulSoup(entry.get('summary', 'No summary'), "html.parser").get_text()[:400]
+              summary_raw = entry.get('summary', 'No summary provided')
+              summary_en = BeautifulSoup(summary_raw, "html.parser").get_text()[:500]
               link = entry.link
               
               try:
-                  # 调用 DeepSeek 进行“翻译+总结”
                   resp = requests.post(
                       "https://api.deepseek.com/chat/completions",
                       headers={"Authorization": f"Bearer {os.environ['AI_API_KEY']}"},
                       json={
                           "model": "deepseek-chat",
                           "messages": [
-                              {"role": "system", "content": "你是一位专业的AI科技主编。请将提供的 AI 新闻标题翻译成吸引人的中文，并用 3 个要点总结核心价值。请直接使用文字和换行排版，绝对不要使用 ** 或 # 等任何 Markdown 符号。"},
+                              {
+                                  "role": "system", 
+                                  "content": "你是一位专业的 AI 技术教练。请将提供的 AI 内容翻译并总结成中文。重点阐述：1. 这是什么工具或课程？2. 它能解决什么实际问题？3. 适合谁使用/学习。请直接排版，严禁使用 ** 或 # 等任何 Markdown 符号。"
+                              },
                               {"role": "user", "content": f"Title: {title_en}\nSummary: {summary_en}"}
                           ]
                       },
                       timeout=30
                   )
                   ai_result = resp.json()['choices'][0]['message']['content']
-                  # 再次强制过滤可能出现的 Markdown 符号
-                  ai_result = ai_result.replace("**", "").replace("### ", "").replace("# ", "")
-              except:
-                  ai_result = f"标题: {title_en}\n(翻译及总结暂时离线)"
+                  # 二次清理 Markdown
+                  ai_result = ai_result.replace("**", "").replace("### ", "").replace("# ", "").replace("`", "")
+              except Exception as e:
+                  ai_result = f"项目标题: {title_en}\n(AI 深度分析接口调用异常)"
 
-              final_message += f"{ai_result}\n🔗 原文: {link}\n\n----------------\n"
+              final_message += f"{ai_result}\n🔗 链接: {link}\n\n----------------\n"
 
-          # 4. 关键修改：使用 text 类型发送，解决普通微信报错问题
+          # 4. 发送至企业微信/机器人
           requests.post(
               os.environ['WECHAT_WEBHOOK'],
               json={
@@ -91,5 +107,5 @@ jobs:
                   }
               }
           )
-          print("推送完成！")
+          print("推送已发送！")
           EOF
