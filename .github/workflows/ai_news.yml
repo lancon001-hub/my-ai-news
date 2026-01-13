@@ -2,8 +2,8 @@ name: AI News Tools & Courses Pro
 
 on:
   schedule:
-    - cron: '26 0 * * *' # 每天北京时间早上 8:30 运行
-  workflow_dispatch: # 支持手动点击运行测试
+    - cron: '18 0 * * *' 
+  workflow_dispatch: 
 
 jobs:
   build:
@@ -22,90 +22,87 @@ jobs:
           AI_API_KEY: ${{ secrets.AI_API_KEY }}
           WECHAT_WEBHOOK: ${{ secrets.WECHAT_WEBHOOK }}
         run: |
-          python - <<EOF
+          # 注意：下面这一行改成了 <<'EOF'，防止 Bash 解析内部符号
+          python - <<'EOF'
           import feedparser
           import requests
           import os
-          import re
+          import sys
           from bs4 import BeautifulSoup
 
-          # 1. 筛选高质量的实战类与工具类信息源
+          webhook = os.environ.get('WECHAT_WEBHOOK')
+          api_key = os.environ.get('AI_API_KEY')
+          
+          if not webhook or not api_key:
+              print("错误: 缺少配置变量 WECHAT_WEBHOOK 或 AI_API_KEY")
+              sys.exit(1)
+
+          headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
           sources = [
-              "https://rsshub.app/deeplearning/the-batch",     # DeepLearning.AI (吴恩达周报)
-              "https://huggingface.co/blog/feed.xml",          # Hugging Face (模型与工具发布)
-              "https://www.unite.ai/category/ai-tools/feed/",  # 专门的 AI 工具评测
-              "https://blog.langchain.dev/rss/",                # LangChain 官方博客 (实战案例)
-              "https://github.com/trending/python?since=daily" # GitHub 趋势 (通过 Python 抓取逻辑间接实现或后续扩展)
+              "https://rsshub.app/deeplearning/the-batch",
+              "https://huggingface.co/blog/feed.xml",
+              "https://www.unite.ai/category/ai-tools/feed/",
+              "https://blog.langchain.dev/rss/"
           ]
           
-          # 核心关键词过滤，确保内容偏向“实用”和“学习”
           keywords = ['course', 'tool', 'library', 'guide', 'tutorial', 'open source', 'release', 'framework', 'agent', 'workflow', 'model']
-
           all_entries = []
+
+          print("开始抓取资讯...")
           for url in sources:
               try:
-                  feed = feedparser.parse(url)
+                  resp = requests.get(url, headers=headers, timeout=20)
+                  feed = feedparser.parse(resp.text)
                   if not feed.entries: continue
                   
-                  source_count = 0
+                  count = 0
                   for entry in feed.entries:
                       content = (entry.title + entry.get('summary', '')).lower()
-                      # 如果匹配到关键词，或者是来自 DeepLearning.AI/HuggingFace 的内容，则优先选取
                       if any(kw in content for kw in keywords) or "huggingface" in url or "deeplearning" in url:
                           all_entries.append(entry)
-                          source_count += 1
-                      if source_count >= 2: break # 每个源最多取 2 条最相关的
+                          count += 1
+                      if count >= 2: break
               except Exception as e:
-                  print(f"抓取 {url} 失败: {e}")
-                  continue
+                  print(f"抓取失败 {url}: {e}")
 
           if not all_entries:
-              requests.post(os.environ['WECHAT_WEBHOOK'], json={"msgtype": "text", "text": {"content": "🤖 AI情报员：今日暂无新的工具发布或课程更新。"}})
-              exit()
+              print("未发现匹配内容，结束运行。")
+              sys.exit(0)
 
-          # 2. 准备推送内容
           final_message = "🛠️ AI 实战进阶 & 实用工具周报\n\n"
 
-          # 3. 调用 AI 进行深度总结（取前 4 条最有价值的）
           for entry in all_entries[:4]:
               title_en = entry.title
-              summary_raw = entry.get('summary', 'No summary provided')
-              summary_en = BeautifulSoup(summary_raw, "html.parser").get_text()[:500]
-              link = entry.link
+              summary_en = BeautifulSoup(entry.get('summary', 'No summary'), "html.parser").get_text()[:500]
               
               try:
                   resp = requests.post(
                       "https://api.deepseek.com/chat/completions",
-                      headers={"Authorization": f"Bearer {os.environ['AI_API_KEY']}"},
+                      headers={"Authorization": f"Bearer {api_key}"},
                       json={
                           "model": "deepseek-chat",
                           "messages": [
-                              {
-                                  "role": "system", 
-                                  "content": "你是一位专业的 AI 技术教练。请将提供的 AI 内容翻译并总结成中文。重点阐述：1. 这是什么工具或课程？2. 它能解决什么实际问题？3. 适合谁使用/学习。请直接排版，严禁使用 ** 或 # 等任何 Markdown 符号。"
-                              },
+                              {"role": "system", "content": "你是一位专业的 AI 技术教练。请将 AI 内容翻译总结。重点：1.工具/课程是什么？2.解决什么问题？3.适合谁。严禁 Markdown 符号。"},
                               {"role": "user", "content": f"Title: {title_en}\nSummary: {summary_en}"}
                           ]
                       },
                       timeout=30
                   )
-                  ai_result = resp.json()['choices'][0]['message']['content']
-                  # 二次清理 Markdown
-                  ai_result = ai_result.replace("**", "").replace("### ", "").replace("# ", "").replace("`", "")
+                  if resp.status_code == 200:
+                      ai_result = resp.json()['choices'][0]['message']['content']
+                      # 这里就是之前导致报错的符号，加了单引号后就不会有冲突了
+                      ai_result = ai_result.replace("**", "").replace("### ", "").replace("# ", "").replace("`", "")
+                  else:
+                      ai_result = f"项目: {title_en}\n(AI 接口响应异常: {resp.status_code})"
               except Exception as e:
-                  ai_result = f"项目标题: {title_en}\n(AI 深度分析接口调用异常)"
+                  ai_result = f"项目: {title_en}\n(AI 总结失败: {e})"
 
-              final_message += f"{ai_result}\n🔗 链接: {link}\n\n----------------\n"
+              final_message += f"{ai_result.strip()}\n🔗 链接: {entry.link}\n\n----------------\n"
 
-          # 4. 发送至企业微信/机器人
-          requests.post(
-              os.environ['WECHAT_WEBHOOK'],
-              json={
-                  "msgtype": "text",
-                  "text": {
-                      "content": final_message
-                  }
-              }
-          )
-          print("推送已发送！")
+          try:
+              requests.post(webhook, json={"msgtype": "text", "text": {"content": final_message}}, timeout=10)
+              print("推送完成！")
+          except Exception as e:
+              print(f"推送失败: {e}")
+              sys.exit(1)
           EOF
