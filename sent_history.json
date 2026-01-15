@@ -1,0 +1,12 @@
+{
+  "links": [
+    "6c29f300fe0fd27407bd277f43751d4acb18812f",
+    "8aaca1325b95b79dcaf9fab934fe81a53170fc9d",
+    "https://aws.amazon.com/blogs/machine-learning/how-beekeeper-optimized-user-personalization-with-amazon-bedrock/",
+    "https://aws.amazon.com/blogs/machine-learning/detect-and-redact-personally-identifiable-information-using-amazon-bedrock-data-automation-and-guardrails/",
+    "b767ba4b8dbe07152460b6d1820c8f1a99e9beaa",
+    "638cb671bfb96d037ca183d6ee482e09c86b3394",
+    "https://aws.amazon.com/blogs/machine-learning/how-autoscout24-built-a-bot-factory-to-standardize-ai-agent-development-with-amazon-bedrock/",
+    "https://aws.amazon.com/blogs/machine-learning/ai-agent-driven-browser-automation-for-enterprise-workflow-management/"
+  ]
+}
