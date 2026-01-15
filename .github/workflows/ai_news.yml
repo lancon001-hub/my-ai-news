@@ -1,108 +1,333 @@
-name: AI News Tools & Courses Pro
+name: AI Daily Brief for Amazon JP & Japanese Teaching
 
 on:
   schedule:
-    - cron: '18 0 * * *' 
-  workflow_dispatch: 
+    # 每天东京时间 08:30 推送（GitHub Actions 用 UTC；08:30 JST = 23:30 UTC 前一天）
+    - cron: "30 23 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ai-daily-brief
+  cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.9'
+          python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install feedparser requests beautifulsoup4
+        run: pip install -U feedparser requests beautifulsoup4
 
-      - name: Run AI Tool Bot
+      - name: Run AI Daily Brief Bot
         env:
           AI_API_KEY: ${{ secrets.AI_API_KEY }}
           WECHAT_WEBHOOK: ${{ secrets.WECHAT_WEBHOOK }}
         run: |
-          # 注意：下面这一行改成了 <<'EOF'，防止 Bash 解析内部符号
           python - <<'EOF'
           import feedparser
           import requests
-          import os
-          import sys
+          import os, sys, json, re, time, hashlib
           from bs4 import BeautifulSoup
+          from datetime import datetime, timezone
 
-          webhook = os.environ.get('WECHAT_WEBHOOK')
-          api_key = os.environ.get('AI_API_KEY')
-          
+          webhook = os.environ.get("WECHAT_WEBHOOK")
+          api_key = os.environ.get("AI_API_KEY")
           if not webhook or not api_key:
               print("错误: 缺少配置变量 WECHAT_WEBHOOK 或 AI_API_KEY")
               sys.exit(1)
 
-          headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-          sources = [
-              "https://rsshub.app/deeplearning/the-batch",
-              "https://huggingface.co/blog/feed.xml",
-              "https://www.unite.ai/category/ai-tools/feed/",
-              "https://blog.langchain.dev/rss/"
-          ]
-          
-          keywords = ['course', 'tool', 'library', 'guide', 'tutorial', 'open source', 'release', 'framework', 'agent', 'workflow', 'model']
-          all_entries = []
+          # ====== 你的身份与偏好（你 + 你老婆）======
+          # 1) 日亚跨境电商/运营增长/合规/工具落地
+          W_ECOM = 1.35
+          # 2) 日语教师：AI教学、语料库、教学资源、研究方法
+          W_TEACH = 1.15
+          # 3) 通用 AI 工具/框架：只保留“可落地”内容
+          W_GENERAL = 1.00
 
-          print("开始抓取资讯...")
-          for url in sources:
+          # ====== RSS 源（偏工具、教程、发布、实操）======
+          SOURCES = [
+              # 实操/课程（Andrew Ng 的 The Batch）
+              "https://rsshub.app/deeplearning/the-batch",
+              # Hugging Face 博客（开源/模型/工具）
+              "https://huggingface.co/blog/feed.xml",
+              # LangChain 博客（Agent/Workflow/RAG）
+              "https://blog.langchain.dev/rss/",
+              # Unite.ai 工具类（偏泛，留着用分数筛）
+              "https://www.unite.ai/category/ai-tools/feed/",
+              # OpenAI 官方更新（工具/能力变更：更稳）
+              "https://openai.com/blog/rss.xml",
+              # Google AI（模型、工具、研究到产品）
+              "https://blog.google/technology/ai/rss/",
+              # AWS 机器学习（对电商基础设施与落地有用）
+              "https://aws.amazon.com/blogs/machine-learning/feed/",
+          ]
+
+          HEADERS = {
+              "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
+          }
+
+          # ====== 关键词画像（少而准，避免噪音）======
+          ECOM_KEYWORDS = [
+              "amazon", "fba", "seller", "listing", "keyword", "ads", "ppc", "sponsored",
+              "search term", "ranking", "seo", "conversion", "cvr", "ctr", "acos", "tacos",
+              "pricing", "review", "a+", "brand", "variation", "compliance", "policy",
+              "automation", "scrape", "api", "rapidapi", "rainforest", "catalog", "asin",
+              "japan", "jp", "amazon.co.jp", "logistics", "inventory", "demand", "market research",
+          ]
+          TEACH_KEYWORDS = [
+              "japanese", "japan", "jlpt", "n1", "n2", "grammar", "linguistics", "corpus",
+              "teaching", "pedagogy", "classroom", "lesson", "assessment", "rubric",
+              "anki", "quizlet", "spaced repetition",
+              "llm", "ai", "chatgpt", "prompt", "generation", "feedback", "evaluation",
+          ]
+          GENERAL_KEYWORDS = [
+              "agent", "workflow", "rag", "retrieval", "vector", "embedding", "eval", "benchmark",
+              "open source", "release", "library", "framework", "tool", "sdk", "api",
+              "tutorial", "guide", "course", "cookbook", "playbook",
+              "langchain", "dify", "prompt", "vision", "multimodal",
+          ]
+
+          # 不想看的（泛融资/并购/招聘等）
+          NEGATIVE_KEYWORDS = [
+              "funding", "raises", "series a", "series b", "acquired", "acquisition",
+              "hiring", "we're hiring", "job", "career", "earnings",
+          ]
+
+          # ====== 历史去重（保证每天不一样）======
+          HISTORY_FILE = "sent_history.json"
+          MAX_HISTORY = 800
+
+          def load_history():
+              if not os.path.exists(HISTORY_FILE):
+                  return set()
               try:
-                  resp = requests.get(url, headers=headers, timeout=20)
+                  with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                      data = json.load(f)
+                  if isinstance(data, dict):
+                      links = data.get("links", [])
+                  elif isinstance(data, list):
+                      links = data
+                  else:
+                      links = []
+                  return set(links)
+              except Exception:
+                  return set()
+
+          def save_history(sent_links):
+              # 保序：用 list 截断到最近 MAX_HISTORY
+              links = list(sent_links)
+              data = {"links": links[-MAX_HISTORY:]}
+              with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+                  json.dump(data, f, ensure_ascii=False, indent=2)
+
+          def clean_text(html):
+              return BeautifulSoup(html or "", "html.parser").get_text(" ", strip=True)
+
+          def normalize(s):
+              s = (s or "").lower()
+              s = re.sub(r"\s+", " ", s).strip()
+              return s
+
+          def contains_any(text, kws):
+              return any(kw in text for kw in kws)
+
+          def score_entry(title, summary, link, source_url):
+              text = normalize((title or "") + " " + (summary or ""))
+
+              # 负向过滤强扣分
+              score = 0.0
+              for nk in NEGATIVE_KEYWORDS:
+                  if nk in text:
+                      score -= 8
+
+              # 三个维度分别计分
+              e = sum(1 for kw in ECOM_KEYWORDS if kw in text)
+              t = sum(1 for kw in TEACH_KEYWORDS if kw in text)
+              g = sum(1 for kw in GENERAL_KEYWORDS if kw in text)
+
+              # 标题更重要：标题命中额外加权
+              title_text = normalize(title or "")
+              e_title = sum(1 for kw in ECOM_KEYWORDS if kw in title_text)
+              t_title = sum(1 for kw in TEACH_KEYWORDS if kw in title_text)
+              g_title = sum(1 for kw in GENERAL_KEYWORDS if kw in title_text)
+
+              score += W_ECOM * (e * 2.2 + e_title * 2.0)
+              score += W_TEACH * (t * 1.7 + t_title * 1.6)
+              score += W_GENERAL * (g * 1.4 + g_title * 1.3)
+
+              # 形态偏好：更倾向可落地资源
+              link_l = (link or "").lower()
+              if any(x in link_l for x in ["github.com", "/docs", "cookbook", "tutorial", "guide", "release", "changelog"]):
+                  score += 2.0
+
+              # 源的轻度加权（你常用/更靠谱的）
+              if "huggingface.co" in source_url:
+                  score += 1.5
+              if "langchain.dev" in source_url:
+                  score += 1.5
+              if "openai.com" in source_url:
+                  score += 1.2
+              if "deeplearning" in source_url:
+                  score += 1.0
+              if "aws.amazon.com" in source_url:
+                  score += 0.8
+
+              return score
+
+          def deepseek_summarize(title, summary, link):
+              # 你和你老婆的“统一输出格式”：不带 Markdown
+              system_prompt = (
+                  "你是面向夫妻组合的AI落地情报官："
+                  "丈夫：日本亚马逊跨境电商运营与自动化；"
+                  "妻子：日语教师/教学与研究方法。"
+                  "请把内容压缩成可执行摘要，严禁使用任何Markdown符号（如# * - 等）。"
+                  "输出结构固定为5行："
+                  "1) 标题：一句中文"
+                  "2) 这是什么：工具/课程/方法/更新（20字内）"
+                  "3) 解决什么：具体痛点（30字内）"
+                  "4) 适合谁：分别说明对“电商”和“日语教学”是否有用（各15字内）"
+                  "5) 下一步：给出1个立刻可做的动作（25字内）"
+              )
+
+              user_content = f"Title: {title}\nSummary: {summary}\nLink: {link}"
+
+              resp = requests.post(
+                  "https://api.deepseek.com/chat/completions",
+                  headers={"Authorization": f"Bearer {api_key}"},
+                  json={
+                      "model": "deepseek-chat",
+                      "messages": [
+                          {"role": "system", "content": system_prompt},
+                          {"role": "user", "content": user_content},
+                      ],
+                      "temperature": 0.2,
+                  },
+                  timeout=35,
+              )
+              if resp.status_code != 200:
+                  return f"标题：{title}\n这是什么：AI内容\n解决什么：接口异常\n适合谁：电商/教学：未知\n下一步：稍后重试"
+              data = resp.json()
+              txt = data["choices"][0]["message"]["content"].strip()
+
+              # 再清洗一次，防止模型偷跑符号
+              txt = txt.replace("**", "").replace("###", "").replace("#", "").replace("`", "")
+              txt = txt.replace("•", "").replace("·", "")
+              return txt
+
+          sent_links = load_history()
+          print(f"已加载历史链接：{len(sent_links)}")
+
+          candidates = []
+          print("开始抓取资讯...")
+
+          for url in SOURCES:
+              try:
+                  resp = requests.get(url, headers=HEADERS, timeout=20)
                   feed = feedparser.parse(resp.text)
-                  if not feed.entries: continue
-                  
-                  count = 0
-                  for entry in feed.entries:
-                      content = (entry.title + entry.get('summary', '')).lower()
-                      if any(kw in content for kw in keywords) or "huggingface" in url or "deeplearning" in url:
-                          all_entries.append(entry)
-                          count += 1
-                      if count >= 2: break
+                  if not getattr(feed, "entries", None):
+                      continue
+
+                  # 每个源抓更多，靠打分筛
+                  for entry in feed.entries[:40]:
+                      title = getattr(entry, "title", "") or ""
+                      link = getattr(entry, "link", "") or ""
+                      summary_html = entry.get("summary", "") or ""
+                      summary = clean_text(summary_html)[:1600]
+
+                      if not link:
+                          continue
+
+                      # 去重：link 去重
+                      if link in sent_links:
+                          continue
+
+                      # 额外去重：同标题+源 的 hash（防某些源 link 变化）
+                      h = hashlib.sha1((title + "|" + url).encode("utf-8")).hexdigest()
+                      if h in sent_links:
+                          continue
+
+                      sc = score_entry(title, summary, link, url)
+
+                      # 基础门槛：至少与三类关键词之一有关，且不是纯噪音
+                      text = normalize(title + " " + summary)
+                      if sc < 2.5:
+                          # 允许官方源放宽一点，但仍要基本相关
+                          if ("openai.com" not in url and "huggingface.co" not in url and "langchain.dev" not in url):
+                              continue
+                          if not (contains_any(text, GENERAL_KEYWORDS) or contains_any(text, ECOM_KEYWORDS) or contains_any(text, TEACH_KEYWORDS)):
+                              continue
+
+                      candidates.append({
+                          "score": sc,
+                          "title": title,
+                          "summary": summary,
+                          "link": link,
+                          "source": url,
+                          "hash": h,
+                      })
               except Exception as e:
                   print(f"抓取失败 {url}: {e}")
 
-          if not all_entries:
-              print("未发现匹配内容，结束运行。")
+          if not candidates:
+              print("没有发现可推送的新内容（或都已推过），结束运行。")
               sys.exit(0)
 
-          final_message = "🛠️ AI 实战进阶 & 实用工具周报\n\n"
+          # 最高分优先
+          candidates.sort(key=lambda x: x["score"], reverse=True)
 
-          for entry in all_entries[:4]:
-              title_en = entry.title
-              summary_en = BeautifulSoup(entry.get('summary', 'No summary'), "html.parser").get_text()[:500]
-              
+          # 每天推送条数：建议 4（信息量刚好）
+          PICK_N = 4
+          picked = candidates[:PICK_N]
+
+          # 组装消息
+          today_jst = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
+          final_message = f"🧠 AI 每日简报（电商x日语教学）\n日期：{today_jst}\n\n"
+
+          for idx, c in enumerate(picked, 1):
+              title_en = c["title"]
+              summary_en = c["summary"][:550]
+              link = c["link"]
+
               try:
-                  resp = requests.post(
-                      "https://api.deepseek.com/chat/completions",
-                      headers={"Authorization": f"Bearer {api_key}"},
-                      json={
-                          "model": "deepseek-chat",
-                          "messages": [
-                              {"role": "system", "content": "你是一位专业的 AI 技术教练。请将 AI 内容翻译总结。重点：1.工具/课程是什么？2.解决什么问题？3.适合谁。严禁 Markdown 符号。"},
-                              {"role": "user", "content": f"Title: {title_en}\nSummary: {summary_en}"}
-                          ]
-                      },
-                      timeout=30
-                  )
-                  if resp.status_code == 200:
-                      ai_result = resp.json()['choices'][0]['message']['content']
-                      # 这里就是之前导致报错的符号，加了单引号后就不会有冲突了
-                      ai_result = ai_result.replace("**", "").replace("### ", "").replace("# ", "").replace("`", "")
-                  else:
-                      ai_result = f"项目: {title_en}\n(AI 接口响应异常: {resp.status_code})"
+                  ai_result = deepseek_summarize(title_en, summary_en, link)
               except Exception as e:
-                  ai_result = f"项目: {title_en}\n(AI 总结失败: {e})"
+                  ai_result = f"标题：{title_en}\n这是什么：AI内容\n解决什么：总结失败\n适合谁：电商/教学：未知\n下一步：稍后重试（{e})"
 
-              final_message += f"{ai_result.strip()}\n🔗 链接: {entry.link}\n\n----------------\n"
+              final_message += f"【{idx}】\n{ai_result}\n链接：{link}\n\n----------------\n\n"
 
+              # 记录已推送：link + hash 都记，双保险
+              sent_links.add(link)
+              sent_links.add(c["hash"])
+
+              # 小睡一下，避免接口偶发限流
+              time.sleep(1.2)
+
+          # 保存历史
+          save_history(sent_links)
+
+          # 推送到企业微信机器人
           try:
-              requests.post(webhook, json={"msgtype": "text", "text": {"content": final_message}}, timeout=10)
+              requests.post(webhook, json={"msgtype": "text", "text": {"content": final_message}}, timeout=12)
               print("推送完成！")
           except Exception as e:
               print(f"推送失败: {e}")
               sys.exit(1)
           EOF
+
+      - name: Commit sent history
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add sent_history.json
+          git commit -m "Update sent history" || echo "No changes to commit"
+          git push
