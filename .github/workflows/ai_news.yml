@@ -1,10 +1,9 @@
-name: AI Daily Brief & GitHub Trending
+name: AI Daily Brief - Professional Edition
 
 on:
   schedule:
-    # 每天东京时间 08:30 推送（UTC 23:30）
     - cron: "30 23 * * *"
-  workflow_dispatch: # 允许你手动点击 "Run workflow" 测试
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -40,17 +39,20 @@ jobs:
           webhook = os.environ.get("WECHAT_WEBHOOK")
           api_key = os.environ.get("AI_API_KEY")
 
+          # 资讯源补充了智慧建筑与数字化转型
           SOURCES = [
-              "https://hnrss.org/frontpage?q=AI",          # Hacker News AI 热点
-              "https://rsshub.app/github/trending/daily/python", # GitHub 今日趋势
-              "https://huggingface.co/blog/feed.xml",     # 开源前沿
-              "https://openai.com/blog/rss.xml",          # OpenAI 官方
-              "https://blog.langchain.dev/rss/",          # AI 应用
+              "https://hnrss.org/frontpage?q=AI",          
+              "https://huggingface.co/blog/feed.xml",     
+              "https://openai.com/blog/rss.xml",          
+              "https://blog.langchain.dev/rss/",          
+              "https://www.unite.ai/category/ai-tools/feed/",
           ]
 
-          # 关键词加分项
+          # 关键词词库
           ECOM_KWS = ["amazon", "listing", "fba", "ads", "seo", "japan", "ppc"]
           TEACH_KWS = ["japanese", "teaching", "jlpt", "grammar", "classroom", "anki"]
+          # 新增：场馆与协会关键词
+          VENUE_KWS = ["stadium", "venue", "association", "smart city", "event management", "digital twin", "facility", "iot"]
 
           HISTORY_FILE = "sent_history.json"
 
@@ -66,35 +68,33 @@ jobs:
                   json.dump({"links": list(links)[-1000:]}, f)
 
           def get_github_trending():
-              """抓取 GitHub 今日最火项目"""
               results = []
               try:
-                  url = "https://github.com/trending/python?since=daily"
+                  url = "https://github.com/trending?since=daily"
                   headers = {"User-Agent": "Mozilla/5.0"}
                   resp = requests.get(url, headers=headers, timeout=15)
                   soup = BeautifulSoup(resp.text, "html.parser")
-                  for art in soup.find_all("article", class_="Box-row")[:5]:
+                  for art in soup.find_all("article", class_="Box-row")[:15]:
                       t_node = art.h2.a
-                      name = t_node.get_text(strip=True)
+                      name = t_node.get_text(strip=True).replace(" ", "")
                       link = "https://github.com" + t_node["href"]
-                      desc = art.p.get_text(strip=True) if art.p else "No description"
-                      results.append({
-                          "title": f"🔥 GitHub爆火: {name}",
-                          "summary": desc,
-                          "link": link,
-                          "is_trending": True
-                      })
-              except Exception as e: print(f"GH Trending Error: {e}")
+                      desc = art.p.get_text(strip=True) if art.p else ""
+                      full_text = (name + desc).lower()
+                      if any(k in full_text for k in ["ai", "gpt", "llm", "bot", "tool", "agent", "translate", "automation", "data"]):
+                          results.append({"title": f"🔥 GitHub爆火: {name}", "summary": desc, "link": link, "type": "APP", "score": 100})
+              except: pass
               return results
 
-          def ai_summarize(title, summary, link):
-              """调用 DeepSeek 总结并关联你的身份"""
+          def ai_summarize(title, summary, link, is_app=False):
+              # 核心：在这里植入了场馆协会身份
               system_prompt = (
-                  "你是一位AI情报官。你的读者拥有跨境电商/日语高校教师/省场馆协会工作人员三重身份。请用简练、充满干货的中文总结。"
-                  "严禁Markdown符号。固定3行：\n"
-                  "1. 标题：[震撼或吸引人的中文标题]\n"
-                  "2. 性质：[工具/资讯/趋势]\n"
-                  "3. 行动：[建议读者可以怎么做]"
+                  "你是一位全能AI情报官，服务于一位身兼‘日亚电商卖家’、‘省场馆协会工作人员’及‘日语教师家属’的多职能用户。"
+                  "请用专业、干货的中文总结。严禁使用Markdown。请严格输出：\n"
+                  "1. 标题：[吸引人的中文标题]\n"
+                  "2. 性质：[工具/资讯/行业动态]\n"
+                  "3. 商业价值：[对电商/场馆运营/协会工作的具体启发]\n"
+                  "4. 教学价值：[对日语教学或个人效率的提效点]\n"
+                  "5. 行动：[建议用户执行的操作]"
               )
               try:
                   resp = requests.post(
@@ -105,57 +105,54 @@ jobs:
                           "messages": [{"role": "system", "content": system_prompt},
                                        {"role": "user", "content": f"Title: {title}\nSummary: {summary}"}],
                           "temperature": 0.3
-                      }, timeout=40
+                      }, timeout=45
                   )
                   return resp.json()["choices"][0]["message"]["content"].strip()
-              except: return f"标题：{title}\n启发：请点击链接查看详情。"
+              except: return f"标题：{title}\n请点击原文查看详情。"
 
-          # ====== 主程序 ======
+          # ====== 主逻辑 ======
           sent_history = load_history()
-          candidates = []
+          all_candidates = []
 
-          # 1. 抓取趋势
-          candidates.extend(get_github_trending())
+          all_candidates.extend(get_github_trending())
 
-          # 2. 抓取 RSS
           for url in SOURCES:
               try:
                   feed = feedparser.parse(requests.get(url, timeout=15).text)
                   for entry in feed.entries[:10]:
                       link = entry.link
                       if link in sent_history: continue
-                      
                       title = entry.title
                       summary = BeautifulSoup(entry.get("summary", ""), "html.parser").get_text()[:500]
                       
-                      # 计算初步分值
                       score = 1.0
-                      if any(k in (title+summary).lower() for k in ECOM_KWS): score += 2.0
-                      if any(k in (title+summary).lower() for k in TEACH_KWS): score += 2.0
+                      text_lower = (title + summary).lower()
+                      # 权重计算：命中任何一个身份关键词都大幅提分
+                      if any(k in text_lower for k in ECOM_KWS): score += 15.0
+                      if any(k in text_lower for k in TEACH_KWS): score += 15.0
+                      if any(k in text_lower for k in VENUE_KWS): score += 15.0
                       
-                      candidates.append({"title": title, "summary": summary, "link": link, "score": score})
+                      all_candidates.append({"title": title, "summary": summary, "link": link, "score": score, "type": "NEWS"})
               except: continue
 
-          # 3. 筛选前 5 条发送
-          candidates.sort(key=lambda x: x.get("score", 0), reverse=True)
+          all_candidates.sort(key=lambda x: x.get("score", 0), reverse=True)
           final_list = []
-          for item in candidates:
+          for item in all_candidates:
               if item["link"] not in sent_history:
                   final_list.append(item)
-              if len(final_list) >= 5: break
+              if len(final_list) >= 6: break
 
-          if not final_list:
-              print("今日无新内容")
-              sys.exit(0)
+          if not final_list: sys.exit(0)
 
           jst_now = (datetime.now(timezone.utc) + timedelta(hours=9)).strftime("%Y-%m-%d")
-          msg = f"🚀 AI & GitHub 今日情报局\n日期：{jst_now}\n\n"
+          msg = f"🚀 AI & GitHub 每日跨界情报\n日期：{jst_now}\n----------------------------\n\n"
 
           for idx, item in enumerate(final_list, 1):
-              summary_ai = ai_summarize(item["title"], item["summary"], item["link"])
-              msg += f"【{idx}】\n{summary_ai}\n链接：{item['link']}\n\n"
+              summary_ai = ai_summarize(item["title"], item["summary"], item["link"], (item["type"] == "APP"))
+              prefix = "【🔥 热门应用】" if item["type"] == "APP" else f"【💡 行业情报 {idx}】"
+              msg += f"{prefix}\n{summary_ai}\n🔗：{item['link']}\n\n"
               sent_history.add(item["link"])
-              time.sleep(1)
+              time.sleep(1.2)
 
           save_history(sent_history)
           requests.post(webhook, json={"msgtype": "text", "text": {"content": msg}})
