@@ -1,17 +1,13 @@
-name: AI Daily Brief for Amazon JP & Japanese Teaching
+name: AI Daily Brief & GitHub Trending
 
 on:
   schedule:
-    # 每天东京时间 08:30 推送（GitHub Actions 用 UTC；08:30 JST = 23:30 UTC 前一天）
+    # 每天东京时间 08:30 推送（UTC 23:30）
     - cron: "30 23 * * *"
-  workflow_dispatch:
+  workflow_dispatch: # 允许你手动点击 "Run workflow" 测试
 
 permissions:
   contents: write
-
-concurrency:
-  group: ai-daily-brief
-  cancel-in-progress: true
 
 jobs:
   build:
@@ -28,209 +24,147 @@ jobs:
       - name: Install dependencies
         run: pip install -U feedparser requests beautifulsoup4
 
-      - name: Run AI Daily Brief Bot
+      - name: Run AI Agent
         env:
           AI_API_KEY: ${{ secrets.AI_API_KEY }}
           WECHAT_WEBHOOK: ${{ secrets.WECHAT_WEBHOOK }}
         run: |
           python - <<'EOF'
           import feedparser
-import requests
-import os, sys, json, re, time, hashlib
-from bs4 import BeautifulSoup
-from datetime import datetime, timezone, timedelta
+          import requests
+          import os, sys, json, re, time, hashlib
+          from bs4 import BeautifulSoup
+          from datetime import datetime, timezone, timedelta
 
-# ====== 1. 配置与环境变量检查 ======
-webhook = os.environ.get("WECHAT_WEBHOOK")
-api_key = os.environ.get("AI_API_KEY")
+          # ====== 配置区 ======
+          webhook = os.environ.get("WECHAT_WEBHOOK")
+          api_key = os.environ.get("AI_API_KEY")
 
-if not webhook or not api_key:
-    print("错误: 缺少配置变量 WECHAT_WEBHOOK 或 AI_API_KEY")
-    sys.exit(1)
+          SOURCES = [
+              "https://hnrss.org/frontpage?q=AI",          # Hacker News AI 热点
+              "https://rsshub.app/github/trending/daily/python", # GitHub 今日趋势
+              "https://huggingface.co/blog/feed.xml",     # 开源前沿
+              "https://openai.com/blog/rss.xml",          # OpenAI 官方
+              "https://blog.langchain.dev/rss/",          # AI 应用
+          ]
 
-# ====== 2. 核心参数设置 ======
-# 权重分配：日亚电商 > 日语教学 > 通用AI热点
-W_ECOM = 1.5
-W_TEACH = 1.2
-W_HOT_TREND = 1.8  # 赋予 GitHub Trending 更高权重
+          # 关键词加分项
+          ECOM_KWS = ["amazon", "listing", "fba", "ads", "seo", "japan", "ppc"]
+          TEACH_KWS = ["japanese", "teaching", "jlpt", "grammar", "classroom", "anki"]
 
-# 关键词画像
-ECOM_KEYWORDS = ["amazon", "listing", "ads", "fba", "japan", "jp", "inventory", "seo", "consumer", "ppc"]
-TEACH_KEYWORDS = ["japanese", "teaching", "jlpt", "n1", "n2", "classroom", "grammar", "pedagogy", "anki"]
-GENERAL_KEYWORDS = ["agent", "rag", "workflow", "llm", "vision", "automation", "api", "release"]
-# 热点增强词：让脚本更倾向于“爆火”的内容
-HOT_KEYWORDS = ["trending", "viral", "breakthrough", "fastest", "star", "hot", "launched", "showcase"]
+          HISTORY_FILE = "sent_history.json"
 
-# RSS 源 (精选高质量/快资讯源)
-SOURCES = [
-    "https://hnrss.org/frontpage?q=AI",          # Hacker News AI 热点 (极快)
-    "https://rsshub.app/github/trending/daily/python", # GitHub 今日 Python 趋势
-    "https://huggingface.co/blog/feed.xml",     # 开源模型前沿
-    "https://openai.com/blog/rss.xml",          # OpenAI 官方
-    "https://blog.langchain.dev/rss/",          # 应用落地参考
-    "https://www.unite.ai/category/ai-tools/feed/", # 新工具发布
-]
+          def load_history():
+              if not os.path.exists(HISTORY_FILE): return set()
+              try:
+                  with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                      return set(json.load(f).get("links", []))
+              except: return set()
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-}
+          def save_history(links):
+              with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+                  json.dump({"links": list(links)[-1000:]}, f)
 
-# ====== 3. 工具函数 ======
-HISTORY_FILE = "sent_history.json"
-MAX_HISTORY = 1000
+          def get_github_trending():
+              """抓取 GitHub 今日最火项目"""
+              results = []
+              try:
+                  url = "https://github.com/trending/python?since=daily"
+                  headers = {"User-Agent": "Mozilla/5.0"}
+                  resp = requests.get(url, headers=headers, timeout=15)
+                  soup = BeautifulSoup(resp.text, "html.parser")
+                  for art in soup.find_all("article", class_="Box-row")[:5]:
+                      t_node = art.h2.a
+                      name = t_node.get_text(strip=True)
+                      link = "https://github.com" + t_node["href"]
+                      desc = art.p.get_text(strip=True) if art.p else "No description"
+                      results.append({
+                          "title": f"🔥 GitHub爆火: {name}",
+                          "summary": desc,
+                          "link": link,
+                          "is_trending": True
+                      })
+              except Exception as e: print(f"GH Trending Error: {e}")
+              return results
 
-def load_history():
-    if not os.path.exists(HISTORY_FILE): return set()
-    try:
-        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return set(data.get("links", []))
-    except: return set()
+          def ai_summarize(title, summary, link):
+              """调用 DeepSeek 总结并关联你的身份"""
+              system_prompt = (
+                  "你是一位AI情报官。你的读者拥有跨境电商/日语高校教师/省场馆协会工作人员三重身份。请用简练、充满干货的中文总结。"
+                  "严禁Markdown符号。固定3行：\n"
+                  "1. 标题：[震撼或吸引人的中文标题]\n"
+                  "2. 性质：[工具/资讯/趋势]\n"
+                  "3. 行动：[建议读者可以怎么做]"
+              )
+              try:
+                  resp = requests.post(
+                      "https://api.deepseek.com/chat/completions",
+                      headers={"Authorization": f"Bearer {api_key}"},
+                      json={
+                          "model": "deepseek-chat",
+                          "messages": [{"role": "system", "content": system_prompt},
+                                       {"role": "user", "content": f"Title: {title}\nSummary: {summary}"}],
+                          "temperature": 0.3
+                      }, timeout=40
+                  )
+                  return resp.json()["choices"][0]["message"]["content"].strip()
+              except: return f"标题：{title}\n启发：请点击链接查看详情。"
 
-def save_history(links):
-    data = {"links": list(links)[-MAX_HISTORY:]}
-    with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+          # ====== 主程序 ======
+          sent_history = load_history()
+          candidates = []
 
-def normalize(s):
-    return re.sub(r"\s+", " ", (s or "").lower()).strip()
+          # 1. 抓取趋势
+          candidates.extend(get_github_trending())
 
-def score_entry(title, summary, link):
-    text = normalize(title + " " + (summary or ""))
-    score = 0.0
-    
-    # 基础维度得分
-    e = sum(1 for kw in ECOM_KEYWORDS if kw in text)
-    t = sum(1 for kw in TEACH_KEYWORDS if kw in text)
-    g = sum(1 for kw in GENERAL_KEYWORDS if kw in text)
-    h = sum(1 for kw in HOT_KEYWORDS if kw in text)
-    
-    score += W_ECOM * e + W_TEACH * t + g * 1.0 + W_HOT_TREND * h
-    
-    # 特殊加分：如果是 GitHub 链接或官方教程
-    if any(x in link.lower() for x in ["github.com", "tutorial", "guide", "release"]):
-        score += 2.5
-    return score
+          # 2. 抓取 RSS
+          for url in SOURCES:
+              try:
+                  feed = feedparser.parse(requests.get(url, timeout=15).text)
+                  for entry in feed.entries[:10]:
+                      link = entry.link
+                      if link in sent_history: continue
+                      
+                      title = entry.title
+                      summary = BeautifulSoup(entry.get("summary", ""), "html.parser").get_text()[:500]
+                      
+                      # 计算初步分值
+                      score = 1.0
+                      if any(k in (title+summary).lower() for k in ECOM_KWS): score += 2.0
+                      if any(k in (title+summary).lower() for k in TEACH_KWS): score += 2.0
+                      
+                      candidates.append({"title": title, "summary": summary, "link": link, "score": score})
+              except: continue
 
-# ====== 4. 特殊抓取：GitHub Trending ======
-def get_github_trending():
-    trending_list = []
-    try:
-        url = "https://github.com/trending/python?since=daily"
-        resp = requests.get(url, headers=HEADERS, timeout=15)
-        soup = BeautifulSoup(resp.text, "html.parser")
-        items = soup.find_all("article", class_="Box-row")
-        
-        for item in items[:8]: # 取前8名
-            title_node = item.find("h2")
-            name = title_node.get_text(strip=True).replace(" ", "")
-            link = "https://github.com" + title_node.find("a")["href"]
-            desc = item.find("p", class_="col-9").get_text(strip=True) if item.find("p") else ""
-            stars = item.find("span", class_="d-inline-block float-sm-right").get_text(strip=True)
-            
-            trending_list.append({
-                "title": f"🔥 GitHub Trending: {name}",
-                "summary": f"【今日增长 {stars}】{desc}",
-                "link": link,
-                "score": 15.0  # 强制高分入选
-            })
-    except Exception as e:
-        print(f"GitHub Trending 抓取失败: {e}")
-    return trending_list
+          # 3. 筛选前 5 条发送
+          candidates.sort(key=lambda x: x.get("score", 0), reverse=True)
+          final_list = []
+          for item in candidates:
+              if item["link"] not in sent_history:
+                  final_list.append(item)
+              if len(final_list) >= 5: break
 
-# ====== 5. AI 总结逻辑 ======
-def deepseek_summarize(title, summary, link):
-    system_prompt = (
-        "你是一位服务于集合跨境电商卖家与日语教师和体育场馆协会工作人员的一位AI情报专家"
-        "请用直白、充满干货的风格总结。严禁使用任何Markdown符号（如# * -等）。"
-        "固定输出5行："
-        "1. 标题：[一句带情绪的中文，如：重磅！/必看！]"
-        "2. 这是什么：[工具/热点/新功能] (15字内)"
-        "3. 电商启发：[对日亚选品/广告/运营的实际用处] (40字内)"
-        "4. 教学启发：[对日语教学/出题/提效的帮助] (40字内)"
-        "5. 立即行动：[给读者的具体建议] (20字内)"
-    )
-    user_content = f"Title: {title}\nSummary: {summary}\nLink: {link}"
-    
-    try:
-        resp = requests.post(
-            "https://api.deepseek.com/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}"},
-            json={
-                "model": "deepseek-chat",
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content}
-                ],
-                "temperature": 0.3
-            },
-            timeout=40
-        )
-        if resp.status_code == 200:
-            return resp.json()["choices"][0]["message"]["content"].strip()
-    except: pass
-    return f"标题：{title}\n性质：未知\n电商：暂无\n教学：暂无\n下一步：点击原文查看"
+          if not final_list:
+              print("今日无新内容")
+              sys.exit(0)
 
-# ====== 6. 主执行流程 ======
-sent_links = load_history()
-candidates = []
+          jst_now = (datetime.now(timezone.utc) + timedelta(hours=9)).strftime("%Y-%m-%d")
+          msg = f"🚀 AI & GitHub 今日情报局\n日期：{jst_now}\n\n"
 
-# A. 抓取 GitHub 趋势
-print("正在搜寻 GitHub 今日最火项目...")
-candidates.extend([c for c in get_github_trending() if c["link"] not in sent_links])
+          for idx, item in enumerate(final_list, 1):
+              summary_ai = ai_summarize(item["title"], item["summary"], item["link"])
+              msg += f"【{idx}】\n{summary_ai}\n链接：{item['link']}\n\n"
+              sent_history.add(item["link"])
+              time.sleep(1)
 
-# B. 抓取 RSS 资讯
-print("正在扫描 AI 资讯源...")
-for url in SOURCES:
-    try:
-        f = feedparser.parse(requests.get(url, headers=HEADERS, timeout=15).text)
-        for entry in f.entries[:15]:
-            link = getattr(entry, "link", "")
-            if not link or link in sent_links: continue
-            
-            title = entry.title
-            summary = BeautifulSoup(entry.get("summary", ""), "html.parser").get_text()[:1000]
-            sc = score_entry(title, summary, link)
-            
-            if sc > 2.0:
-                candidates.append({"score": sc, "title": title, "summary": summary, "link": link})
-    except: continue
-
-# C. 筛选与发送
-if not candidates:
-    print("今日无符合质量的热点资讯。")
-    sys.exit(0)
-
-candidates.sort(key=lambda x: x["score"], reverse=True)
-picked = candidates[:5] # 每天精选 5 条
-
-today_jst = (datetime.now(timezone.utc) + timedelta(hours=9)).strftime("%Y-%m-%d")
-final_message = f"🚀 AI & GitHub 今日情报 (日亚x日语)\n日期：{today_jst}\n\n"
-
-for idx, item in enumerate(picked, 1):
-    print(f"总结第 {idx} 条: {item['title']}")
-    summary_text = deepseek_summarize(item["title"], item["summary"][:600], item["link"])
-    # 清洗可能残余的符号
-    summary_text = re.sub(r'[*#`\-]', '', summary_text)
-    
-    final_message += f"【{idx}】\n{summary_text}\n链接：{item['link']}\n\n"
-    sent_links.add(item["link"])
-    time.sleep(1) # 频率控制
-
-# D. 历史保存与推送
-save_history(sent_links)
-try:
-    requests.post(webhook, json={"msgtype": "text", "text": {"content": final_message}}, timeout=15)
-    print("推送成功！")
-except Exception as e:
-    print(f"推送失败: {e}")
-    
+          save_history(sent_history)
+          requests.post(webhook, json={"msgtype": "text", "text": {"content": msg}})
           EOF
 
-      - name: Commit sent history
+      - name: Commit & Push history
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add sent_history.json
-          git commit -m "Update sent history" || echo "No changes to commit"
-          git push
+          git add sent_history.json || true
+          git commit -m "update history" || true
+          git push || true
