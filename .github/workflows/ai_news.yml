@@ -1,4 +1,4 @@
-name: AI Daily Brief - Professional Edition
+name: AI Daily Brief - Pro Mix
 
 on:
   schedule:
@@ -35,24 +35,22 @@ jobs:
           from bs4 import BeautifulSoup
           from datetime import datetime, timezone, timedelta
 
-          # ====== 配置区 ======
+          # ====== 1. 配置区 ======
           webhook = os.environ.get("WECHAT_WEBHOOK")
           api_key = os.environ.get("AI_API_KEY")
 
-          # 资讯源补充了智慧建筑与数字化转型
           SOURCES = [
-              "https://hnrss.org/frontpage?q=AI",          
-              "https://huggingface.co/blog/feed.xml",     
+              "https://hnrss.org/frontpage?q=AI",          # 全球最火AI话题
+              "https://rsshub.app/pnas/topic/computer-science", # 科技前沿
+              "https://huggingface.co/blog/feed.xml",     # AI技术趋势
               "https://openai.com/blog/rss.xml",          
               "https://blog.langchain.dev/rss/",          
-              "https://www.unite.ai/category/ai-tools/feed/",
           ]
 
-          # 关键词词库
-          ECOM_KWS = ["amazon", "listing", "fba", "ads", "seo", "japan", "ppc"]
-          TEACH_KWS = ["japanese", "teaching", "jlpt", "grammar", "classroom", "anki"]
-          # 新增：场馆与协会关键词
-          VENUE_KWS = ["stadium", "venue", "association", "smart city", "event management", "digital twin", "facility", "iot"]
+          # 关键词画像
+          ECOM_KWS = ["amazon", "listing", "fba", "japan", "jp", "advertising"]
+          TEACH_KWS = ["japanese", "teaching", "jlpt", "language", "nihongo"]
+          VENUE_KWS = ["stadium", "venue", "association", "smart city", "event", "governance", "digital"]
 
           HISTORY_FILE = "sent_history.json"
 
@@ -68,33 +66,32 @@ jobs:
                   json.dump({"links": list(links)[-1000:]}, f)
 
           def get_github_trending():
-              results = []
+              """抓取热门应用"""
+              apps = []
               try:
                   url = "https://github.com/trending?since=daily"
-                  headers = {"User-Agent": "Mozilla/5.0"}
-                  resp = requests.get(url, headers=headers, timeout=15)
+                  resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
                   soup = BeautifulSoup(resp.text, "html.parser")
-                  for art in soup.find_all("article", class_="Box-row")[:15]:
+                  for art in soup.find_all("article", class_="Box-row")[:20]:
                       t_node = art.h2.a
                       name = t_node.get_text(strip=True).replace(" ", "")
                       link = "https://github.com" + t_node["href"]
-                      desc = art.p.get_text(strip=True) if art.p else ""
-                      full_text = (name + desc).lower()
-                      if any(k in full_text for k in ["ai", "gpt", "llm", "bot", "tool", "agent", "translate", "automation", "data"]):
-                          results.append({"title": f"🔥 GitHub爆火: {name}", "summary": desc, "link": link, "type": "APP", "score": 100})
+                      desc = art.p.get_text(strip=True) if art.p else "AI Tool"
+                      if any(k in (name+desc).lower() for k in ["ai", "gpt", "llm", "bot", "tool", "agent", "translate", "automation"]):
+                          apps.append({"title": name, "summary": desc, "link": link, "type": "APP"})
               except: pass
-              return results
+              return apps
 
-          def ai_summarize(title, summary, link, is_app=False):
-              # 核心：在这里植入了场馆协会身份
+          def ai_summarize(title, summary, link, role_type="NEWS"):
+              # 提示词专门针对你的三重身份做了极致优化
               system_prompt = (
-                  "你是一位全能AI情报官，服务于一位身兼‘日亚电商卖家’、‘省场馆协会工作人员’及‘日语教师家属’的多职能用户。"
-                  "请用专业、干货的中文总结。严禁使用Markdown。请严格输出：\n"
-                  "1. 标题：[吸引人的中文标题]\n"
-                  "2. 性质：[工具/资讯/行业动态]\n"
-                  "3. 商业价值：[对电商/场馆运营/协会工作的具体启发]\n"
-                  "4. 教学价值：[对日语教学或个人效率的提效点]\n"
-                  "5. 行动：[建议用户执行的操作]"
+                  "你是一位全能AI情报分析师。用户身份：1.日亚跨境卖家 2.省场馆协会工作人员 3.日语教师家属。"
+                  "请用专业且接地气的中文总结。严禁使用Markdown。请严格输出：\n"
+                  "1. 标题：[一句吸睛的中文标题]\n"
+                  "2. 性质：[工具/资讯/行业风向]\n"
+                  "3. 核心价值：[该资讯对电商运营或场馆/协会工作的具体帮助]\n"
+                  "4. 生活/教学：[对日语学习或提升个人效率的意义]\n"
+                  "5. 建议：[建议用户立刻执行的操作]"
               )
               try:
                   resp = requests.post(
@@ -110,47 +107,61 @@ jobs:
                   return resp.json()["choices"][0]["message"]["content"].strip()
               except: return f"标题：{title}\n请点击原文查看详情。"
 
-          # ====== 主逻辑 ======
+          # ====== 2. 主逻辑 ======
           sent_history = load_history()
-          all_candidates = []
+          
+          # 【桶逻辑】分为应用桶和资讯桶
+          app_pool = []
+          news_pool = []
 
-          all_candidates.extend(get_github_trending())
+          # A. 填充应用桶
+          print("获取 GitHub 趋势...")
+          raw_apps = get_github_trending()
+          for a in raw_apps:
+              if a["link"] not in sent_history:
+                  app_pool.append(a)
 
+          # B. 填充资讯桶
+          print("获取 AI 资讯...")
           for url in SOURCES:
               try:
                   feed = feedparser.parse(requests.get(url, timeout=15).text)
                   for entry in feed.entries[:10]:
                       link = entry.link
                       if link in sent_history: continue
+                      
                       title = entry.title
                       summary = BeautifulSoup(entry.get("summary", ""), "html.parser").get_text()[:500]
                       
-                      score = 1.0
-                      text_lower = (title + summary).lower()
-                      # 权重计算：命中任何一个身份关键词都大幅提分
-                      if any(k in text_lower for k in ECOM_KWS): score += 15.0
-                      if any(k in text_lower for k in TEACH_KWS): score += 15.0
-                      if any(k in text_lower for k in VENUE_KWS): score += 15.0
+                      # 打分决定资讯质量
+                      score = 0
+                      txt = (title + summary).lower()
+                      if any(k in txt for k in ECOM_KWS): score += 10
+                      if any(k in txt for k in TEACH_KWS): score += 10
+                      if any(k in txt for k in VENUE_KWS): score += 10
                       
-                      all_candidates.append({"title": title, "summary": summary, "link": link, "score": score, "type": "NEWS"})
+                      news_pool.append({"title": title, "summary": summary, "link": link, "score": score, "type": "NEWS"})
               except: continue
+          
+          news_pool.sort(key=lambda x: x["score"], reverse=True)
 
-          all_candidates.sort(key=lambda x: x.get("score", 0), reverse=True)
-          final_list = []
-          for item in all_candidates:
-              if item["link"] not in sent_history:
-                  final_list.append(item)
-              if len(final_list) >= 6: break
+          # C. 强制混合：取 3 个应用 + 3 条最相关的资讯
+          final_list = app_pool[:3] + news_pool[:3]
 
-          if not final_list: sys.exit(0)
+          if not final_list:
+              print("今日无更新")
+              sys.exit(0)
 
           jst_now = (datetime.now(timezone.utc) + timedelta(hours=9)).strftime("%Y-%m-%d")
-          msg = f"🚀 AI & GitHub 每日跨界情报\n日期：{jst_now}\n----------------------------\n\n"
+          msg = f"🚀 AI & GitHub 每日多维简报\n日期：{jst_now}\n"
+          msg += "----------------------------\n\n"
 
           for idx, item in enumerate(final_list, 1):
-              summary_ai = ai_summarize(item["title"], item["summary"], item["link"], (item["type"] == "APP"))
-              prefix = "【🔥 热门应用】" if item["type"] == "APP" else f"【💡 行业情报 {idx}】"
-              msg += f"{prefix}\n{summary_ai}\n🔗：{item['link']}\n\n"
+              print(f"处理第 {idx} 条...")
+              summary_ai = ai_summarize(item["title"], item["summary"], item["link"])
+              
+              tag = "🔥 热门应用" if item.get("type") == "APP" else "💡 行业情报"
+              msg += f"【{idx}. {tag}】\n{summary_ai}\n🔗：{item['link']}\n\n"
               sent_history.add(item["link"])
               time.sleep(1.2)
 
